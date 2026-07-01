@@ -5,7 +5,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::usage::ProviderSelection;
-use crate::core::{FetchContext, ProviderId, SourceMode, instantiate_provider};
+use crate::core::{
+    DisplayPayloadBuilder, FetchContext, ProviderFetchResult, ProviderId, SourceMode,
+    instantiate_provider,
+};
 use crate::cost_scanner::CostScanner;
 
 #[derive(Args, Debug, Clone)]
@@ -63,6 +66,7 @@ async fn route_request(request: &ServeRequest) -> String {
             serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }),
         ),
         "/usage" => usage_response(request.query.get("provider").map(String::as_str)).await,
+        "/display" => display_response(request.query.get("provider").map(String::as_str)).await,
         "/cost" => cost_response(request.query.get("provider").map(String::as_str)).await,
         _ => json_response(404, serde_json::json!({ "error": "not found" })),
     }
@@ -103,6 +107,53 @@ async fn usage_response(provider: Option<&str>) -> String {
         }
     }
     json_response(200, serde_json::Value::Array(results))
+}
+
+async fn display_response(provider: Option<&str>) -> String {
+    let selection = match ProviderSelection::from_arg(provider) {
+        Ok(selection) => selection,
+        Err(error) => {
+            return json_response(400, serde_json::json!({ "error": error.to_string() }));
+        }
+    };
+    let results = collect_usage_results(selection.as_list()).await;
+    let payload = DisplayPayloadBuilder::payload(
+        results
+            .iter()
+            .map(|(provider_id, result)| (*provider_id, result)),
+    );
+    json_response(
+        200,
+        serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
+    )
+}
+
+async fn collect_usage_results(
+    providers: Vec<ProviderId>,
+) -> Vec<(ProviderId, ProviderFetchResult)> {
+    let ctx = FetchContext {
+        source_mode: SourceMode::Auto,
+        include_credits: true,
+        web_timeout: 60,
+        verbose: false,
+        manual_cookie_header: None,
+        api_key: None,
+        workspace_id: None,
+        api_region: None,
+    };
+
+    let mut results = Vec::new();
+    for provider_id in providers {
+        let provider = instantiate_provider(provider_id);
+        match provider.fetch_usage(&ctx).await {
+            Ok(result) => results.push((provider_id, result)),
+            Err(error) => tracing::debug!(
+                "display feed skipped {} after usage fetch error: {error}",
+                provider_id.cli_name()
+            ),
+        }
+    }
+    results
 }
 
 async fn cost_response(provider: Option<&str>) -> String {
@@ -299,5 +350,15 @@ mod tests {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/usage");
         assert_eq!(request.query.get("provider"), Some(&"deepseek".to_string()));
+    }
+
+    #[test]
+    fn parses_display_route_provider_query() {
+        let request =
+            parse_request("GET /display?provider=all HTTP/1.1\r\nHost: localhost:8080\r\n\r\n")
+                .unwrap();
+        assert_eq!(request.method, "GET");
+        assert_eq!(request.path, "/display");
+        assert_eq!(request.query.get("provider"), Some(&"all".to_string()));
     }
 }

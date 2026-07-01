@@ -138,6 +138,8 @@ codexbar diagnose --pretty
 codexbar usage -p claude
 codexbar usage -p all
 codexbar cost -p codex
+codexbar serve
+curl http://127.0.0.1:8080/display?provider=all
 ```
 
 Installer builds include `codexbar.exe` as the console CLI and `codexbar-desktop.exe` as the tray app. Start Menu shortcuts launch the desktop app; terminal commands use `codexbar.exe`.

@@ -96,6 +96,10 @@ codexbar --status
 # Show local cost usage (Claude + Codex logs)
 codexbar cost
 
+# Serve local JSON endpoints, including the square display feed
+codexbar serve
+curl http://127.0.0.1:8080/display?provider=all
+
 # Enable/disable auto-start on Windows boot
 codexbar autostart enable
 codexbar autostart disable

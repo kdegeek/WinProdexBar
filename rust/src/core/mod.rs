@@ -3,6 +3,7 @@
 mod cost_pricing;
 mod credential_migration;
 mod credentials;
+mod display_payload;
 mod http;
 mod jsonl_scanner;
 mod openai_dashboard;
@@ -19,6 +20,7 @@ mod widget_snapshot;
 pub use cost_pricing::*;
 pub use credential_migration::*;
 pub use credentials::*;
+pub use display_payload::*;
 pub use http::*;
 pub use jsonl_scanner::*;
 pub use openai_dashboard::*;
