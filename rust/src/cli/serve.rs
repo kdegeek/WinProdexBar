@@ -2,10 +2,14 @@
 
 use clap::Args;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
 
 use super::usage::ProviderSelection;
 use crate::core::{
@@ -49,12 +53,17 @@ pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
         args.host, args.port
     );
 
+    let display_cache = DisplayCache::default();
+    warm_display_cache(display_cache.clone(), ProviderId::all().to_vec());
+
     loop {
         let (stream, _) = listener.accept().await?;
         let security = ServeSecurity {
             allow_lan_hosts,
             device_secret: args.device_secret.clone(),
             attention_file: args.attention_file.clone(),
+            display_cache: display_cache.clone(),
+            display_ttl: Duration::from_secs(args.refresh_interval.max(1)),
         };
         tokio::spawn(async move {
             if let Err(error) = handle_client(stream, security).await {
@@ -69,6 +78,25 @@ struct ServeSecurity {
     allow_lan_hosts: bool,
     device_secret: Option<String>,
     attention_file: Option<PathBuf>,
+    display_cache: DisplayCache,
+    display_ttl: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+struct DisplayCache {
+    state: Arc<Mutex<DisplayCacheState>>,
+}
+
+#[derive(Debug, Default)]
+struct DisplayCacheState {
+    entries: HashMap<String, CachedDisplay>,
+    refreshing: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CachedDisplay {
+    fetched_at: Instant,
+    results: Vec<(ProviderId, ProviderFetchResult)>,
 }
 
 async fn handle_client(mut stream: TcpStream, security: ServeSecurity) -> anyhow::Result<()> {
@@ -105,6 +133,8 @@ async fn route_request(request: &ServeRequest, security: &ServeSecurity) -> Stri
             display_response(
                 request.query.get("provider").map(String::as_str),
                 security.attention_file.as_ref(),
+                security.display_cache.clone(),
+                security.display_ttl,
             )
             .await
         }
@@ -161,25 +191,103 @@ async fn usage_response(provider: Option<&str>) -> String {
     json_response(200, serde_json::Value::Array(results))
 }
 
-async fn display_response(provider: Option<&str>, attention_file: Option<&PathBuf>) -> String {
+async fn display_response(
+    provider: Option<&str>,
+    attention_file: Option<&PathBuf>,
+    cache: DisplayCache,
+    ttl: Duration,
+) -> String {
     let selection = match ProviderSelection::from_arg(provider) {
         Ok(selection) => selection,
         Err(error) => {
             return json_response(400, serde_json::json!({ "error": error.to_string() }));
         }
     };
-    let results = collect_usage_results(selection.as_list()).await;
-    let payload = DisplayPayloadBuilder::payload_at(
+    let providers = selection.as_list();
+    let cache_key = display_cache_key(&providers);
+    let results = cached_display_results(cache, cache_key, providers, ttl).await;
+    let payload = display_payload_from_results(&results, attention_file);
+    json_response(
+        200,
+        serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
+    )
+}
+
+fn display_payload_from_results(
+    results: &[(ProviderId, ProviderFetchResult)],
+    attention_file: Option<&PathBuf>,
+) -> crate::core::DisplayPayload {
+    DisplayPayloadBuilder::payload_at(
         results
             .iter()
             .map(|(provider_id, result)| (*provider_id, result)),
         chrono::Utc::now(),
         attention_file.and_then(read_attention_file),
-    );
-    json_response(
-        200,
-        serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
     )
+}
+
+fn display_cache_key(providers: &[ProviderId]) -> String {
+    providers
+        .iter()
+        .map(|provider| provider.cli_name())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+async fn cached_display_results(
+    cache: DisplayCache,
+    cache_key: String,
+    providers: Vec<ProviderId>,
+    ttl: Duration,
+) -> Vec<(ProviderId, ProviderFetchResult)> {
+    let now = Instant::now();
+    {
+        let mut state = cache.state.lock().await;
+        if let Some(entry) = state.entries.get(&cache_key).cloned() {
+            if now.duration_since(entry.fetched_at) <= ttl {
+                return entry.results;
+            }
+            if state.refreshing.insert(cache_key.clone()) {
+                let cache = cache.clone();
+                let cache_key = cache_key.clone();
+                tokio::spawn(async move {
+                    refresh_display_cache(cache, cache_key, providers).await;
+                });
+            }
+            return entry.results;
+        }
+        if !state.refreshing.insert(cache_key.clone()) {
+            return Vec::new();
+        }
+    }
+    tokio::spawn(async move {
+        refresh_display_cache(cache, cache_key, providers).await;
+    });
+    Vec::new()
+}
+
+fn warm_display_cache(cache: DisplayCache, providers: Vec<ProviderId>) {
+    let cache_key = display_cache_key(&providers);
+    tokio::spawn(async move {
+        refresh_display_cache(cache, cache_key, providers).await;
+    });
+}
+
+async fn refresh_display_cache(
+    cache: DisplayCache,
+    cache_key: String,
+    providers: Vec<ProviderId>,
+) {
+    let results = collect_usage_results(providers).await;
+    let mut state = cache.state.lock().await;
+    state.entries.insert(
+        cache_key.clone(),
+        CachedDisplay {
+            fetched_at: Instant::now(),
+            results,
+        },
+    );
+    state.refreshing.remove(&cache_key);
 }
 
 #[derive(Debug, Deserialize)]
@@ -456,6 +564,8 @@ mod tests {
             allow_lan_hosts: true,
             device_secret: Some("topsecret".to_string()),
             attention_file: None,
+            display_cache: DisplayCache::default(),
+            display_ttl: Duration::from_secs(60),
         };
         let allowed = parse_request(
             "GET /display?provider=all&secret=topsecret HTTP/1.1\r\nHost: 192.168.1.20:8080\r\n\r\n",
@@ -513,5 +623,11 @@ mod tests {
         assert_eq!(request.method, "GET");
         assert_eq!(request.path, "/display");
         assert_eq!(request.query.get("provider"), Some(&"all".to_string()));
+    }
+
+    #[test]
+    fn display_cache_key_normalizes_provider_selection() {
+        let providers = ProviderSelection::from_arg(Some("both")).unwrap().as_list();
+        assert_eq!(display_cache_key(&providers), "codex,claude");
     }
 }

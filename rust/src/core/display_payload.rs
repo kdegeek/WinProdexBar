@@ -219,15 +219,15 @@ impl DisplayPayloadBuilder {
     fn identity(provider_id: ProviderId) -> Option<DisplayProviderIdentity> {
         match provider_id {
             ProviderId::Codex => Some(DisplayProviderIdentity {
-                accent: "#1f6feb",
-                background: "#06152f",
+                accent: "#6ea8fe",
+                background: "#07111f",
                 mark: "codex",
                 asset_state: "pet",
                 treatment: DisplayIdentityTreatment::Animated,
             }),
             ProviderId::Claude => Some(DisplayProviderIdentity {
-                accent: "#ff8c00",
-                background: "#2a1200",
+                accent: "#d97757",
+                background: "#1b120f",
                 mark: "claude",
                 asset_state: "sprite",
                 treatment: DisplayIdentityTreatment::Animated,
@@ -240,8 +240,8 @@ impl DisplayPayloadBuilder {
                 treatment: DisplayIdentityTreatment::StaticMark,
             }),
             ProviderId::Antigravity => Some(DisplayProviderIdentity {
-                accent: "#ff4fd8",
-                background: "#090912",
+                accent: "#b86bff",
+                background: "#0c0b13",
                 mark: "antigravity",
                 asset_state: "rainbow",
                 treatment: DisplayIdentityTreatment::RainbowStatic,
@@ -324,12 +324,12 @@ mod tests {
                 .unwrap()
         };
 
-        assert_eq!(identity("codex").accent, "#1f6feb");
+        assert_eq!(identity("codex").accent, "#6ea8fe");
         assert_eq!(
             identity("codex").treatment,
             DisplayIdentityTreatment::Animated
         );
-        assert_eq!(identity("claude").accent, "#ff8c00");
+        assert_eq!(identity("claude").accent, "#d97757");
         assert_eq!(
             identity("claude").treatment,
             DisplayIdentityTreatment::Animated
