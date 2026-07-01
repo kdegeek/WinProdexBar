@@ -14,6 +14,7 @@ pub mod autostart;
 pub mod config;
 pub mod cost;
 pub mod diagnose;
+pub(crate) mod provider_context;
 pub mod serve;
 pub mod tty_runner;
 pub mod usage;

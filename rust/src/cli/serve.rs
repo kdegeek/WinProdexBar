@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 
+use super::provider_context::PersistedProviderContexts;
 use super::usage::ProviderSelection;
 use crate::core::{
     DisplayAttention, DisplayPayloadBuilder, FetchContext, ProviderFetchResult, ProviderId,
@@ -161,20 +162,12 @@ async fn usage_response(provider: Option<&str>) -> String {
             return json_response(400, serde_json::json!({ "error": error.to_string() }));
         }
     };
-    let ctx = FetchContext {
-        source_mode: SourceMode::Auto,
-        include_credits: true,
-        web_timeout: 60,
-        verbose: false,
-        manual_cookie_header: None,
-        api_key: None,
-        workspace_id: None,
-        api_region: None,
-    };
-
+    let base_ctx = server_base_context();
+    let provider_contexts = PersistedProviderContexts::load();
     let mut results = Vec::new();
     for provider_id in selection.as_list() {
         let provider = instantiate_provider(provider_id);
+        let ctx = provider_contexts.fetch_context(provider_id, &base_ctx, None);
         match provider.fetch_usage(&ctx).await {
             Ok(result) => results.push(serde_json::json!({
                 "provider": provider_id.cli_name(),
@@ -278,8 +271,13 @@ async fn refresh_display_cache(
     cache_key: String,
     providers: Vec<ProviderId>,
 ) {
-    let results = collect_usage_results(providers).await;
+    let fresh_results = collect_usage_results(providers).await;
     let mut state = cache.state.lock().await;
+    let previous_results = state
+        .entries
+        .get(&cache_key)
+        .map(|entry| entry.results.as_slice());
+    let results = merge_display_results(previous_results, fresh_results);
     state.entries.insert(
         cache_key.clone(),
         CachedDisplay {
@@ -288,6 +286,30 @@ async fn refresh_display_cache(
         },
     );
     state.refreshing.remove(&cache_key);
+}
+
+fn merge_display_results(
+    previous: Option<&[(ProviderId, ProviderFetchResult)]>,
+    mut fresh: Vec<(ProviderId, ProviderFetchResult)>,
+) -> Vec<(ProviderId, ProviderFetchResult)> {
+    let Some(previous) = previous else {
+        return fresh;
+    };
+    for (previous_id, previous_result) in previous {
+        match fresh
+            .iter_mut()
+            .find(|(fresh_id, _)| fresh_id == previous_id)
+        {
+            Some((_, fresh_result))
+                if fresh_result.source_label == "cli" && previous_result.source_label != "cli" =>
+            {
+                *fresh_result = previous_result.clone();
+            }
+            Some(_) => {}
+            None => fresh.push((*previous_id, previous_result.clone())),
+        }
+    }
+    fresh
 }
 
 #[derive(Debug, Deserialize)]
@@ -320,20 +342,16 @@ fn read_attention_file(path: &PathBuf) -> Option<DisplayAttention> {
 async fn collect_usage_results(
     providers: Vec<ProviderId>,
 ) -> Vec<(ProviderId, ProviderFetchResult)> {
-    let ctx = FetchContext {
-        source_mode: SourceMode::Auto,
-        include_credits: true,
-        web_timeout: 60,
-        verbose: false,
-        manual_cookie_header: None,
-        api_key: None,
-        workspace_id: None,
-        api_region: None,
-    };
-
+    let base_ctx = server_base_context();
+    let provider_contexts = PersistedProviderContexts::load();
     let mut results = Vec::new();
     for provider_id in providers {
         let provider = instantiate_provider(provider_id);
+        let source_override = match provider_id {
+            ProviderId::Claude | ProviderId::Codex => Some(SourceMode::OAuth),
+            _ => None,
+        };
+        let ctx = provider_contexts.fetch_context(provider_id, &base_ctx, source_override);
         match provider.fetch_usage(&ctx).await {
             Ok(result) => results.push((provider_id, result)),
             Err(error) => tracing::debug!(
@@ -343,6 +361,19 @@ async fn collect_usage_results(
         }
     }
     results
+}
+
+fn server_base_context() -> FetchContext {
+    FetchContext {
+        source_mode: SourceMode::Auto,
+        include_credits: true,
+        web_timeout: 60,
+        verbose: false,
+        manual_cookie_header: None,
+        api_key: None,
+        workspace_id: None,
+        api_region: None,
+    }
 }
 
 async fn cost_response(provider: Option<&str>) -> String {
@@ -538,6 +569,7 @@ fn json_response(status: u16, payload: serde_json::Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::{RateWindow, UsageSnapshot};
 
     #[test]
     fn rejects_non_loopback_hosts() {
@@ -629,5 +661,20 @@ mod tests {
     fn display_cache_key_normalizes_provider_selection() {
         let providers = ProviderSelection::from_arg(Some("both")).unwrap().as_list();
         assert_eq!(display_cache_key(&providers), "codex,claude");
+    }
+
+    #[test]
+    fn merge_display_results_keeps_non_cli_result_over_cli_fallback() {
+        let oauth = ProviderFetchResult::new(UsageSnapshot::new(RateWindow::new(50.0)), "oauth");
+        let cli = ProviderFetchResult::new(UsageSnapshot::new(RateWindow::new(100.0)), "cli");
+
+        let merged = merge_display_results(
+            Some(&[(ProviderId::Claude, oauth.clone())]),
+            vec![(ProviderId::Claude, cli)],
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].1.source_label, "oauth");
+        assert_eq!(merged[0].1.usage.primary.used_percent, 50.0);
     }
 }

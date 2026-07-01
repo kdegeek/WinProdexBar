@@ -9,6 +9,8 @@ use crate::core::{
 };
 use crate::status::{ProviderStatus as StatusInfo, StatusLevel, fetch_provider_status};
 
+use super::provider_context::PersistedProviderContexts;
+
 pub const PROVIDER_ARG_HELP: &str = "Provider to query (for example: codex, claude, gemini, nanogpt, deepseek, codebuff, windsurf, all, both)";
 
 /// Arguments for the usage command
@@ -150,7 +152,9 @@ struct UsageCommand {
     use_color: bool,
     fetch_status: bool,
     pretty: bool,
-    ctx: FetchContext,
+    base_ctx: FetchContext,
+    source_override: Option<SourceMode>,
+    provider_contexts: PersistedProviderContexts,
 }
 
 impl UsageCommand {
@@ -158,6 +162,7 @@ impl UsageCommand {
         let format = effective_format(&args);
         let source_mode = SourceMode::parse(&args.source).unwrap_or(SourceMode::Auto);
         let providers = ProviderSelection::from_arg(args.provider.as_deref())?.as_list();
+        let source_override = (source_mode != SourceMode::Auto).then_some(source_mode);
 
         Ok(Self {
             format,
@@ -165,7 +170,9 @@ impl UsageCommand {
             use_color: !args.no_color && is_terminal(),
             fetch_status: args.status,
             pretty: args.pretty,
-            ctx: build_usage_fetch_context(&args, source_mode),
+            base_ctx: build_usage_fetch_context(&args, source_mode),
+            source_override,
+            provider_contexts: PersistedProviderContexts::load(),
         })
     }
 
@@ -174,7 +181,7 @@ impl UsageCommand {
             "Running usage command: providers={:?}, format={:?}, source={:?}, status={}",
             self.providers,
             self.format,
-            self.ctx.source_mode,
+            self.base_ctx.source_mode,
             self.fetch_status
         );
     }
@@ -261,7 +268,11 @@ async fn fetch_provider_result(
     let status_future = command
         .fetch_status
         .then(|| fetch_provider_status(provider_id.cli_name()));
-    let result = provider.fetch_usage(&command.ctx).await?;
+    let ctx =
+        command
+            .provider_contexts
+            .fetch_context(provider_id, &command.base_ctx, command.source_override);
+    let result = provider.fetch_usage(&ctx).await?;
     let status = if let Some(fut) = status_future {
         fut.await
     } else {

@@ -49,7 +49,7 @@ impl AntigravityProvider {
         cmd.args([
                 "-ExecutionPolicy", "Bypass",
                 "-Command",
-                "Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*language_server_windows*' } | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
+                "Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*language_server*' } | ForEach-Object { \"$($_.ProcessId)`t$($_.CommandLine)\" }"
             ]);
         #[cfg(windows)]
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -79,7 +79,7 @@ impl AntigravityProvider {
             .get_or_init(|| Regex::new(r"--extension_server_port\s+(\d+)").expect("valid regex"));
 
         for line in stdout.lines() {
-            if line.contains("language_server_windows") && line.contains("--csrf_token") {
+            if line.contains("language_server") && line.contains("--csrf_token") {
                 // Line is "<pid>\t<command line>"; split off the PID prefix we added so the
                 // PID can be used to enumerate the process's real listening ports below.
                 let (pid, line) = match line.split_once('\t') {
@@ -102,11 +102,11 @@ impl AntigravityProvider {
                     .and_then(|c| c.get(1))
                     .and_then(|m| m.as_str().parse::<u16>().ok());
 
-                if let (Some(token), Some(p)) = (csrf_token, port) {
+                if let Some(token) = csrf_token {
                     return Ok(ProcessInfo {
                         csrf_token: token,
                         extension_server_csrf_token: ext_csrf_token,
-                        extension_port: p,
+                        extension_port: port.unwrap_or(0),
                         pid,
                     });
                 }
@@ -144,7 +144,9 @@ impl AntigravityProvider {
         if let Some(pid) = pid {
             candidates.extend(Self::listening_ports_for_pid(pid));
         }
-        candidates.extend((0..20u16).map(|offset| extension_port.saturating_add(offset)));
+        if extension_port > 0 {
+            candidates.extend((0..20u16).map(|offset| extension_port.saturating_add(offset)));
+        }
         candidates.extend([53835, 53836, 53837, 53838, 53845, 53849]);
 
         let mut probed: Vec<u16> = Vec::new();
