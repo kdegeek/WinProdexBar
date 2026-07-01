@@ -88,12 +88,13 @@ impl DisplayPayloadBuilder {
     pub fn payload<'a>(
         rows: impl IntoIterator<Item = (ProviderId, &'a ProviderFetchResult)>,
     ) -> DisplayPayload {
-        Self::payload_at(rows, Utc::now())
+        Self::payload_at(rows, Utc::now(), None)
     }
 
     pub fn payload_at<'a>(
         rows: impl IntoIterator<Item = (ProviderId, &'a ProviderFetchResult)>,
         generated_at: DateTime<Utc>,
+        attention: Option<DisplayAttention>,
     ) -> DisplayPayload {
         let mut display_rows = rows
             .into_iter()
@@ -127,7 +128,7 @@ impl DisplayPayloadBuilder {
             },
             generated_at,
             providers: display_rows,
-            attention: None,
+            attention,
         }
     }
 
@@ -269,6 +270,7 @@ mod tests {
         let payload = DisplayPayloadBuilder::payload_at(
             rows.iter().map(|(provider, result)| (*provider, result)),
             now,
+            None,
         );
 
         assert_eq!(payload.schema_version, 1);
@@ -310,6 +312,7 @@ mod tests {
         let payload = DisplayPayloadBuilder::payload_at(
             rows.iter().map(|(provider, result)| (*provider, result)),
             now,
+            None,
         );
 
         let identity = |provider: &str| {

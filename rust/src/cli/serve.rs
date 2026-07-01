@@ -1,18 +1,25 @@
 //! Local HTTP server for scriptable usage/cost JSON.
 
 use clap::Args;
+use serde::Deserialize;
+use std::net::IpAddr;
+use std::path::PathBuf;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 use super::usage::ProviderSelection;
 use crate::core::{
-    DisplayPayloadBuilder, FetchContext, ProviderFetchResult, ProviderId, SourceMode,
-    instantiate_provider,
+    DisplayAttention, DisplayPayloadBuilder, FetchContext, ProviderFetchResult, ProviderId,
+    SourceMode, instantiate_provider,
 };
 use crate::cost_scanner::CostScanner;
 
 #[derive(Args, Debug, Clone)]
 pub struct ServeArgs {
+    /// Local HTTP host. Use 0.0.0.0 with --device-secret for LAN devices.
+    #[arg(long, default_value = "127.0.0.1")]
+    pub host: String,
+
     /// Local HTTP port
     #[arg(long, default_value = "8080")]
     pub port: u16,
@@ -20,31 +27,56 @@ pub struct ServeArgs {
     /// Response cache TTL in seconds
     #[arg(long = "refresh-interval", default_value = "60")]
     pub refresh_interval: u64,
+
+    /// Required secret for /display when serving LAN devices
+    #[arg(long = "device-secret")]
+    pub device_secret: Option<String>,
+
+    /// Optional Codex/Claude attention JSON file consumed by /display
+    #[arg(long = "attention-file")]
+    pub attention_file: Option<PathBuf>,
 }
 
 pub async fn run(args: ServeArgs) -> anyhow::Result<()> {
-    let listener = TcpListener::bind(("127.0.0.1", args.port)).await?;
+    let allow_lan_hosts = !is_loopback_bind_host(&args.host);
+    if allow_lan_hosts && args.device_secret.as_deref().unwrap_or_default().is_empty() {
+        anyhow::bail!("--device-secret is required when --host is not loopback");
+    }
+
+    let listener = TcpListener::bind((args.host.as_str(), args.port)).await?;
     eprintln!(
-        "CodexBar server listening on http://127.0.0.1:{}",
-        args.port
+        "CodexBar server listening on http://{}:{}",
+        args.host, args.port
     );
 
     loop {
         let (stream, _) = listener.accept().await?;
+        let security = ServeSecurity {
+            allow_lan_hosts,
+            device_secret: args.device_secret.clone(),
+            attention_file: args.attention_file.clone(),
+        };
         tokio::spawn(async move {
-            if let Err(error) = handle_client(stream).await {
+            if let Err(error) = handle_client(stream, security).await {
                 tracing::debug!("serve client error: {error}");
             }
         });
     }
 }
 
-async fn handle_client(mut stream: TcpStream) -> anyhow::Result<()> {
+#[derive(Debug, Clone)]
+struct ServeSecurity {
+    allow_lan_hosts: bool,
+    device_secret: Option<String>,
+    attention_file: Option<PathBuf>,
+}
+
+async fn handle_client(mut stream: TcpStream, security: ServeSecurity) -> anyhow::Result<()> {
     let mut buffer = vec![0_u8; 8192];
     let n = stream.read(&mut buffer).await?;
     let request = String::from_utf8_lossy(&buffer[..n]);
     let response = match parse_request(&request) {
-        Ok(request) => route_request(&request).await,
+        Ok(request) => route_request(&request, &security).await,
         Err(status) => json_response(status, serde_json::json!({ "error": "bad request" })),
     };
     stream.write_all(response.as_bytes()).await?;
@@ -52,12 +84,15 @@ async fn handle_client(mut stream: TcpStream) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn route_request(request: &ServeRequest) -> String {
+async fn route_request(request: &ServeRequest, security: &ServeSecurity) -> String {
     if request.method != "GET" {
         return json_response(405, serde_json::json!({ "error": "method not allowed" }));
     }
-    if !allowed_host(&request.host) {
+    if !allowed_host(&request.host, security.allow_lan_hosts) {
         return json_response(403, serde_json::json!({ "error": "forbidden host" }));
+    }
+    if request.path == "/display" && !display_secret_allowed(request, security) {
+        return json_response(401, serde_json::json!({ "error": "unauthorized" }));
     }
 
     match request.path.as_str() {
@@ -66,10 +101,27 @@ async fn route_request(request: &ServeRequest) -> String {
             serde_json::json!({ "status": "ok", "version": env!("CARGO_PKG_VERSION") }),
         ),
         "/usage" => usage_response(request.query.get("provider").map(String::as_str)).await,
-        "/display" => display_response(request.query.get("provider").map(String::as_str)).await,
+        "/display" => {
+            display_response(
+                request.query.get("provider").map(String::as_str),
+                security.attention_file.as_ref(),
+            )
+            .await
+        }
         "/cost" => cost_response(request.query.get("provider").map(String::as_str)).await,
         _ => json_response(404, serde_json::json!({ "error": "not found" })),
     }
+}
+
+fn display_secret_allowed(request: &ServeRequest, security: &ServeSecurity) -> bool {
+    let Some(secret) = security.device_secret.as_deref() else {
+        return true;
+    };
+    !secret.is_empty()
+        && request
+            .query
+            .get("secret")
+            .is_some_and(|value| value == secret)
 }
 
 async fn usage_response(provider: Option<&str>) -> String {
@@ -109,7 +161,7 @@ async fn usage_response(provider: Option<&str>) -> String {
     json_response(200, serde_json::Value::Array(results))
 }
 
-async fn display_response(provider: Option<&str>) -> String {
+async fn display_response(provider: Option<&str>, attention_file: Option<&PathBuf>) -> String {
     let selection = match ProviderSelection::from_arg(provider) {
         Ok(selection) => selection,
         Err(error) => {
@@ -117,15 +169,44 @@ async fn display_response(provider: Option<&str>) -> String {
         }
     };
     let results = collect_usage_results(selection.as_list()).await;
-    let payload = DisplayPayloadBuilder::payload(
+    let payload = DisplayPayloadBuilder::payload_at(
         results
             .iter()
             .map(|(provider_id, result)| (*provider_id, result)),
+        chrono::Utc::now(),
+        attention_file.and_then(read_attention_file),
     );
     json_response(
         200,
         serde_json::to_value(payload).unwrap_or_else(|_| serde_json::json!({})),
     )
+}
+
+#[derive(Debug, Deserialize)]
+struct AttentionFile {
+    provider: String,
+    reason: Option<String>,
+    action: Option<String>,
+    active: Option<bool>,
+}
+
+fn read_attention_file(path: &PathBuf) -> Option<DisplayAttention> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    let attention: AttentionFile = serde_json::from_str(&raw).ok()?;
+    if attention.active == Some(false) {
+        return None;
+    }
+    let provider = attention.provider.to_ascii_lowercase();
+    if provider != "codex" && provider != "claude" {
+        return None;
+    }
+    Some(DisplayAttention {
+        provider,
+        reason: attention
+            .reason
+            .unwrap_or_else(|| "needs_attention".to_string()),
+        action: attention.action.unwrap_or_else(|| "OPEN".to_string()),
+    })
 }
 
 async fn collect_usage_results(
@@ -256,7 +337,7 @@ fn parse_target(target: &str) -> (String, std::collections::HashMap<String, Stri
     (path.to_string(), query)
 }
 
-fn allowed_host(host: &str) -> bool {
+fn allowed_host(host: &str, allow_lan_hosts: bool) -> bool {
     let trimmed = host.trim();
     if trimmed.is_empty() || trimmed.contains(',') {
         return false;
@@ -280,7 +361,23 @@ fn allowed_host(host: &str) -> bool {
     matches!(
         without_port.to_ascii_lowercase().as_str(),
         "127.0.0.1" | "localhost" | "localhost." | "[::1]"
-    )
+    ) || (allow_lan_hosts && is_allowed_lan_host(&without_port))
+}
+
+fn is_loopback_bind_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+        || host.parse::<IpAddr>().is_ok_and(|addr| addr.is_loopback())
+}
+
+fn is_allowed_lan_host(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    host.parse::<IpAddr>().is_ok_and(|addr| {
+        addr.is_loopback()
+            || match addr {
+                IpAddr::V4(v4) => v4.is_private() || v4.is_link_local(),
+                IpAddr::V6(v6) => v6.is_unique_local() || v6.is_unicast_link_local(),
+            }
+    })
 }
 
 fn valid_port_suffix(raw: &str) -> bool {
@@ -318,6 +415,7 @@ fn json_response(status: u16, payload: serde_json::Value) -> String {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
         405 => "Method Not Allowed",
@@ -335,11 +433,66 @@ mod tests {
 
     #[test]
     fn rejects_non_loopback_hosts() {
-        assert!(allowed_host("127.0.0.1:8080"));
-        assert!(allowed_host("localhost"));
-        assert!(allowed_host("[::1]:8080"));
-        assert!(!allowed_host("example.com"));
-        assert!(!allowed_host("127.0.0.1, example.com"));
+        assert!(allowed_host("127.0.0.1:8080", false));
+        assert!(allowed_host("localhost", false));
+        assert!(allowed_host("[::1]:8080", false));
+        assert!(!allowed_host("192.168.1.20:8080", false));
+        assert!(!allowed_host("example.com", false));
+        assert!(!allowed_host("127.0.0.1, example.com", false));
+    }
+
+    #[test]
+    fn allows_private_hosts_only_for_lan_device_mode() {
+        assert!(allowed_host("192.168.1.20:8080", true));
+        assert!(allowed_host("10.0.0.7", true));
+        assert!(allowed_host("172.16.0.3", true));
+        assert!(!allowed_host("8.8.8.8", true));
+        assert!(!allowed_host("example.com", true));
+    }
+
+    #[test]
+    fn display_secret_is_required_when_configured() {
+        let security = ServeSecurity {
+            allow_lan_hosts: true,
+            device_secret: Some("topsecret".to_string()),
+            attention_file: None,
+        };
+        let allowed = parse_request(
+            "GET /display?provider=all&secret=topsecret HTTP/1.1\r\nHost: 192.168.1.20:8080\r\n\r\n",
+        )
+        .unwrap();
+        let rejected =
+            parse_request("GET /display?provider=all HTTP/1.1\r\nHost: 192.168.1.20:8080\r\n\r\n")
+                .unwrap();
+        assert!(display_secret_allowed(&allowed, &security));
+        assert!(!display_secret_allowed(&rejected, &security));
+    }
+
+    #[test]
+    fn reads_codex_claude_attention_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attention.json");
+        std::fs::write(
+            &path,
+            r#"{"provider":"codex","reason":"approval","action":"OPEN"}"#,
+        )
+        .unwrap();
+
+        let attention = read_attention_file(&path).unwrap();
+        assert_eq!(attention.provider, "codex");
+        assert_eq!(attention.reason, "approval");
+        assert_eq!(attention.action, "OPEN");
+    }
+
+    #[test]
+    fn ignores_inactive_or_unsupported_attention_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("attention.json");
+        std::fs::write(&path, r#"{"provider":"ollama","active":true}"#).unwrap();
+        assert!(read_attention_file(&path).is_none());
+
+        std::fs::write(&path, r#"{"provider":"claude","active":false}"#).unwrap();
+        assert!(read_attention_file(&path).is_none());
     }
 
     #[test]

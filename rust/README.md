@@ -99,6 +99,8 @@ codexbar cost
 # Serve local JSON endpoints, including the square display feed
 codexbar serve
 curl http://127.0.0.1:8080/display?provider=all
+codexbar serve --host 0.0.0.0 --device-secret my-screen-secret
+codexbar serve --host 0.0.0.0 --device-secret my-screen-secret --attention-file %APPDATA%\CodexBar\attention.json
 
 # Enable/disable auto-start on Windows boot
 codexbar autostart enable

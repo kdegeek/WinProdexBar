@@ -140,6 +140,14 @@ codexbar usage -p all
 codexbar cost -p codex
 codexbar serve
 curl http://127.0.0.1:8080/display?provider=all
+codexbar serve --host 0.0.0.0 --device-secret my-screen-secret
+codexbar serve --host 0.0.0.0 --device-secret my-screen-secret --attention-file %APPDATA%\CodexBar\attention.json
+```
+
+The optional attention file enables the square display takeover for Codex or Claude:
+
+```json
+{"provider":"codex","reason":"approval","action":"OPEN"}
 ```
 
 Installer builds include `codexbar.exe` as the console CLI and `codexbar-desktop.exe` as the tray app. Start Menu shortcuts launch the desktop app; terminal commands use `codexbar.exe`.
