@@ -29,8 +29,8 @@ pub struct ServeArgs {
     #[arg(long, default_value = "8080")]
     pub port: u16,
 
-    /// Response cache TTL in seconds
-    #[arg(long = "refresh-interval", default_value = "60")]
+    /// Upstream provider refresh interval in seconds. Device polls still use cached data.
+    #[arg(long = "refresh-interval", default_value = "600")]
     pub refresh_interval: u64,
 
     /// Required secret for /display when serving LAN devices
