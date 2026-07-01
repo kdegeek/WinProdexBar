@@ -161,6 +161,11 @@ For the GeekMagic display workflow before publishing a full installer, build a l
 .\target\winprodexbar-display\run-display-server.ps1 -Secret "my-screen-secret"
 ```
 
+Future device-management work should make the screen fully manageable from
+WinProdexBar: discover screens, configure WiFi/companion settings, reboot/reset,
+trigger OTA updates, and show status/debug/screenshot data from the firmware
+management endpoints.
+
 ## Release Builds
 
 For local Windows release builds, use the cached release builder:
