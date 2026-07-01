@@ -142,15 +142,24 @@ codexbar serve
 curl http://127.0.0.1:8080/display?provider=all
 codexbar serve --host 0.0.0.0 --device-secret my-screen-secret
 codexbar serve --host 0.0.0.0 --device-secret my-screen-secret --attention-file %APPDATA%\CodexBar\attention.json
+codexbar attention set --provider codex --reason approval --action OPEN
+codexbar attention clear
 ```
 
-The optional attention file enables the square display takeover for Codex or Claude:
+The optional attention file enables the square display takeover for Codex or Claude. Hooks can either write the JSON directly or call `codexbar attention set` / `codexbar attention clear`:
 
 ```json
-{"provider":"codex","reason":"approval","action":"OPEN"}
+{"provider":"codex","reason":"approval","action":"OPEN","active":true}
 ```
 
 Installer builds include `codexbar.exe` as the console CLI and `codexbar-desktop.exe` as the tray app. Start Menu shortcuts launch the desktop app; terminal commands use `codexbar.exe`.
+
+For the GeekMagic display workflow before publishing a full installer, build a local folder with both executables and a display-server launcher:
+
+```powershell
+.\scripts\windows-display-package.ps1
+.\target\winprodexbar-display\run-display-server.ps1 -Secret "my-screen-secret"
+```
 
 ## Release Builds
 

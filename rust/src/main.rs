@@ -98,6 +98,7 @@ fn dispatch_command(rt: &Runtime, command: Option<Commands>) -> i32 {
         Some(Commands::Diagnose(args)) => run_categorized(rt, cli::diagnose::run(args)),
         Some(Commands::Serve(args)) => run_unexpected(rt, cli::serve::run(args)),
         Some(Commands::Autostart(args)) => run_unexpected(rt, cli::autostart::run(args)),
+        Some(Commands::Attention(args)) => run_unexpected(rt, cli::attention::run(args)),
         Some(Commands::Account(args)) => run_unexpected(rt, cli::account::run(args)),
         Some(Commands::Config(args)) => run_unexpected(rt, cli::config::run(args)),
         None => missing_subcommand(),

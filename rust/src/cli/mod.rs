@@ -9,6 +9,7 @@
 #![allow(dead_code)]
 
 pub mod account;
+pub mod attention;
 pub mod autostart;
 pub mod config;
 pub mod cost;
@@ -118,6 +119,9 @@ pub enum Commands {
 
     /// Manage auto-start on Windows boot
     Autostart(autostart::AutostartArgs),
+
+    /// Set or clear the square-display attention takeover
+    Attention(attention::AttentionArgs),
 
     /// Manage token accounts for providers
     Account(account::AccountArgs),

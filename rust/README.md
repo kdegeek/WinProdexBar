@@ -102,10 +102,21 @@ curl http://127.0.0.1:8080/display?provider=all
 codexbar serve --host 0.0.0.0 --device-secret my-screen-secret
 codexbar serve --host 0.0.0.0 --device-secret my-screen-secret --attention-file %APPDATA%\CodexBar\attention.json
 
+# Drive the square-display attention takeover
+codexbar attention set --provider claude --reason finished --action OPEN
+codexbar attention clear
+
 # Enable/disable auto-start on Windows boot
 codexbar autostart enable
 codexbar autostart disable
 codexbar autostart status
+```
+
+From the repository root, local GeekMagic display testing can use a folder that contains the tray app, CLI, and display-server launcher:
+
+```powershell
+.\scripts\windows-display-package.ps1
+.\target\winprodexbar-display\run-display-server.ps1 -Secret "my-screen-secret"
 ```
 
 ### Exit Codes
